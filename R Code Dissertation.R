@@ -3,7 +3,7 @@
 ##   MODELLING AND FORECASTING THE UNDERWRITING CYCLE IN GENERAL INSURANCE   ##
 ##   Using Hidden Markov Switching Time Series Models                        ##
 ##                                                                           ##
-##   Author       : Tisha Mendpara                                           ##
+##   Author       : Tisha Alpeshbhai Mendpara                                ##
 ##   Student ID   : 230014950                                                ##
 ##   Supervisor   : Dr Iqbal Owadally                                        ##
 ##   BSc Actuarial Science - Bayes Business School                           ##
@@ -29,9 +29,10 @@
 ##        7c. PP  - 3-state levels HMM    [extension]
 ##        7d. Auto - 2-state GARCH-residual HMM [primary]
 ##        7e. Auto - 3-state HMM          [extension - fails]
-##  8.  Expected regime durations and stationary distribution
-##  9. Out-of-sample rolling forecast evaluation (2011–2022)
-##  9. Regime-conditioned forecasts (2023–2025)
+##  8.  HMM Model election - BIC Comparison
+##  9.  Expected regime durations and stationary distribution
+##  10. Out-of-sample rolling forecast evaluation (2011–2022)
+##  11. Regime-conditioned forecasts (2023–2025)
 ## 
 ##  ────────────────────────────────────────────────────────────────────────
 
@@ -50,11 +51,14 @@ library(depmixS4)    # Hidden Markov Models (depmix, fit, posterior, getpars)
 library(WaveletComp) # Continuous wavelet transform (analyze.wavelet, wt.image)
 library(dplyr)       # Data manipulation (filter, mutate, etc.)
 library(tidyr)       # Data reshaping (pivot_longer)
-library(ggplot2)
-library(patchwork)
-library(readxl)
+library(ggplot2)     # Grammar of graphics for plotting and visualisation
+library(patchwork)   # Combining multiple ggplot objects into composite figures
+library(readxl)      # Importing Excel (.xlsx) data files
 
 # Import Excel 
+# The raw loss ratio data are stored in an Excel file.
+# To replicate the analysis, place the file in the working directory
+
 pc_raw <- read_excel("P&C.Canada.xlsx")
 
 # ── 0.2 Extract Personal Property (PP) loss ratio series ─────────────────────
@@ -119,7 +123,6 @@ plot(auto_ts, main = "Auto loss ratio, 1985-2022",
      ylab = "Loss Ratio",
      ylim = range(pp_ts, auto_ts))
 grid(col = "grey85")
-
 
 
 ###############################################################################
@@ -223,14 +226,15 @@ rmse_pp_lvl <- c(
 )
 print(round(rmse_pp_lvl, 4))
 
+# Selected model: AR(1) on levels
+best_pp_lvl <- m1_pp_lvl
+
+# Residuals From selected model
 res_pp_lvl <- residuals(best_pp_lvl)
 
 Box.test(res_pp_lvl,
-         lag  = 9,          
+         lag  = 8,          
          type = "Ljung-Box")
-
-# Selected model: AR(1) on levels
-best_pp_lvl <- m1_pp_lvl
 
 res_pp <- residuals(best_pp_lvl)
 df_res <- data.frame(res = as.numeric(res_pp))
@@ -297,7 +301,7 @@ best_pp_d1 <- m2_pp_d1
 res_pp_d1 <- residuals(best_pp_d1)
 
 Box.test(res_pp_d1,
-         lag  = 6,          
+         lag  = 7,          
          type = "Ljung-Box")
 
 # residuals from PP I(1) model
@@ -484,9 +488,20 @@ cat("α:", round(alpha_pp_d1, 4),
 # Note: levels spec is retained as primary; differenced results are robustness only.
 
 # RMSE
+rmse <- function(actual, fitted) {
+  sqrt(mean((actual - fitted)^2, na.rm = TRUE))
+}
+
+
+# Actual and fitted values (difference scale)
 pp_d1_actual <- as.numeric(pp_ts_d1)
 pp_d1_fitted <- as.numeric(fitted(fit_garch_pp_d1))
+
 rmse_garch_pp_d1 <- rmse(pp_d1_actual, pp_d1_fitted)
+cat("PP Δ loss ratio GARCH RMSE:", round(rmse_garch_pp_d1, 4), "\n")
+
+rmse_garch_pp_d1 <- rmse(pp_d1_actual, pp_d1_fitted)
+rmse_garch_pp_d1
 
 # Standardised residual diagnostics
 resid_pp_d1 <- residuals(fit_garch_pp_d1, standardize = TRUE)
@@ -610,6 +625,7 @@ wt.image(wt_pp_lvl,
          legend.params = list(lab = "Power"),
          periodlab = "Period (years)")
 
+
 # ── 6.2 Auto levels ─────────────────────────────────────────────────────────
 auto_df <- data.frame(
   time = as.numeric(time(auto_ts)),
@@ -628,7 +644,7 @@ wt_auto <- analyze.wavelet(
 )
 
 wt.image(wt_auto,
-         main      = "Wavelet power spectrum - PP loss ratio",
+         main      = "Wavelet power spectrum - Auto loss ratio",
          legend.params = list(lab = "Power"),
          periodlab = "Period (years)")
 
@@ -646,7 +662,7 @@ wt.image(wt_auto,
 
 # ── 7a. PP - 2-state HMM on LEVELS [PRIMARY SPECIFICATION] ───────────────────
 #
-#  Why levels? PP is near-stationary, and the level series carries the
+#  PP is near-stationary, and the level series carries the
 #  economically meaningful regime structure (hard/soft market phases).
 #  The decoded state path maps directly onto underwriting conditions.
 
@@ -859,8 +875,91 @@ loglik_auto_3state <- as.numeric(logLik(fit_hmm_auto_3st))
 # so it’s useful only as evidence that adding a third regime overfits this 38-year sample.
 
 
+
 ###############################################################################
-## 8.  EXPECTED REGIME DURATIONS AND STATIONARY DISTRIBUTION
+## 8. HMM MODEL SELECTION — BIC COMPARISON
+###############################################################################
+##
+## Bayesian Information Criterion (BIC):
+##   BIC = -2 × logLik + p × ln(n)
+##
+## where:
+##   p = K^2 + K
+##       = K(K−1) transition probabilities
+##       + K state-dependent means
+##       + K state-dependent variances
+##   n = number of time-series observations
+##
+## Lower BIC indicates preferred model (penalises over-parameterisation).
+###############################################################################
+
+library(depmixS4)
+
+# Number of observations (annual data)
+n <- length(pp_ts)  # expected to be 38
+
+# ---------------------------------------------------------------------------
+# Helper function to estimate a Gaussian HMM and extract log-likelihood
+# ---------------------------------------------------------------------------
+fit_hmm_loglik <- function(ts_data, k) {
+  
+  hmm_spec <- depmix(
+    response = ts_data ~ 1,
+    data     = data.frame(ts_data = ts_data),
+    nstates  = k,
+    family   = gaussian()
+  )
+  
+  hmm_fit <- fit(hmm_spec, verbose = FALSE)
+  
+  return(as.numeric(logLik(hmm_fit)))
+}
+
+# ---------------------------------------------------------------------------
+# Fit HMMs and extract log-likelihoods
+# ---------------------------------------------------------------------------
+
+# Property (PP) — levels
+loglik_pp_2state   <- fit_hmm_loglik(pp_ts, k = 2)
+loglik_pp_3state   <- fit_hmm_loglik(pp_ts, k = 3)
+
+# Auto — residuals or levels (as used elsewhere in analysis)
+loglik_auto_2state <- fit_hmm_loglik(auto_ts, k = 2)
+loglik_auto_3state <- fit_hmm_loglik(auto_ts, k = 3)
+
+# ---------------------------------------------------------------------------
+# BIC calculation function
+# ---------------------------------------------------------------------------
+bic_fn <- function(loglik, k, n) {
+  p   <- k^2 + k
+  bic <- -2 * loglik + p * log(n)
+  c(logLik = round(loglik, 2),
+    params = p,
+    BIC    = round(bic, 2))
+}
+
+# ---------------------------------------------------------------------------
+# BIC comparison table
+# ---------------------------------------------------------------------------
+cat("\n── HMM BIC model comparison ────────────────────────────────────────────\n")
+
+bic_tbl <- rbind(
+  "PP 2-state (levels)"   = bic_fn(loglik_pp_2state,   k = 2, n = n),
+  "PP 3-state (levels)"   = bic_fn(loglik_pp_3state,   k = 3, n = n),
+  "Auto 2-state"          = bic_fn(loglik_auto_2state, k = 2, n = n),
+  "Auto 3-state"          = bic_fn(loglik_auto_3state, k = 3, n = n)
+)
+
+print(bic_tbl)
+
+# Interpretation:
+# Given the small sample size (n = 38), BIC consistently favours the two-state
+# specification for both PP and Auto, reflecting the strong penalty imposed on
+# additional regime complexity.
+
+
+###############################################################################
+## 9.  EXPECTED REGIME DURATIONS AND STATIONARY DISTRIBUTION
 ###############################################################################
 ##
 ##  For a K-state Markov chain:
@@ -923,7 +1022,7 @@ print(regime_tbl, row.names = FALSE)
 
 
 ###############################################################################
-## 9.  OUT-OF-SAMPLE ROLLING FORECAST EVALUATION
+## 10.  OUT-OF-SAMPLE ROLLING FORECAST EVALUATION
 ###############################################################################
 ##
 ##  Protocol: expanding window, train on 1985–2010 (26 obs), forecast 2011–2022
@@ -937,166 +1036,161 @@ print(regime_tbl, row.names = FALSE)
 train_end  <- 2010
 test_start <- 2011
 test_end   <- 2022
-n_test     <- test_end - test_start + 1   # 12 forecasts
+n_test     <- 12
 
-years_oos  <- test_start:test_end
-actual_pp  <- as.numeric(window(pp_ts,   start = test_start, end = test_end))
+years_oos   <- test_start:test_end
+actual_pp   <- as.numeric(window(pp_ts,   start = test_start, end = test_end))
 actual_auto <- as.numeric(window(auto_ts, start = test_start, end = test_end))
 
-# Storage vectors
-arima_pp_fc  <- numeric(n_test)
-hmm_pp_fc    <- numeric(n_test)
-arima_auto_fc  <- numeric(n_test)
-garch_auto_fc  <- numeric(n_test)
-hmm_auto_fc    <- numeric(n_test)
+# Storage
+arima_pp_fc   <- numeric(n_test)
+hmm_pp_fc     <- numeric(n_test)
+arima_auto_fc <- numeric(n_test)
+garch_auto_fc <- numeric(n_test)
 
-# ── 10.1 PP — rolling forecasts ───────────────────────────────────────────────
-cat("\n── PP rolling forecasts ───────────────────────\n")
+# ── PP rolling forecasts ──────────────────────────────────────────
+cat("Running PP rolling forecasts...\n")
 for (i in seq_len(n_test)) {
-
-  train_pp <- window(pp_ts, end = train_end + i - 1)   # expanding window
-
-  # ARIMA(0,1,0) — random walk
-  fit_tmp_arima <- Arima(train_pp, order = c(0, 1, 0))
-  arima_pp_fc[i] <- as.numeric(forecast(fit_tmp_arima, h = 1)$mean)
-
-  # 2-state HMM on levels — regime-conditioned forecast
-  y_tmp <- as.numeric(train_pp)
+  train_pp <- window(pp_ts, end = train_end + i - 1)
+  y_tmp    <- as.numeric(train_pp)
+  
+  # Benchmark: AR(1) on levels (selected model)
+  fit_arima_tmp    <- Arima(train_pp, order = c(1, 0, 0))
+  arima_pp_fc[i]   <- as.numeric(forecast(fit_arima_tmp, h = 1)$mean)
+  
+  # HMM: 2-state on levels, regime-conditioned forecast
+  # Forecast = weighted average of state means using transition probs
   set.seed(123)
-  fit_tmp_hmm <- tryCatch({
-    m <- depmix(y_tmp ~ 1, data = data.frame(y_tmp = y_tmp),
-                nstates = 2, family = gaussian())
+  fit_hmm_tmp <- tryCatch({
+    m <- depmix(y_tmp ~ 1,
+                data    = data.frame(y_tmp = y_tmp),
+                nstates = 2,
+                family  = gaussian())
     fit(m, verbose = FALSE)
   }, error = function(e) NULL)
-
-  if (!is.null(fit_tmp_hmm)) {
-    post_tmp    <- posterior(fit_tmp_hmm)
-    last_state  <- tail(post_tmp$state, 1)
-    pars_tmp    <- getpars(fit_tmp_hmm)
-    state_means <- c(pars_tmp[7], pars_tmp[9])
-    hmm_pp_fc[i] <- state_means[last_state]   # forecast = state-specific mean
+  
+  if (!is.null(fit_hmm_tmp)) {
+    pars_tmp     <- getpars(fit_hmm_tmp)
+    tmat_tmp     <- matrix(pars_tmp[3:6], nrow = 2, byrow = TRUE)
+    means_tmp    <- c(pars_tmp[7], pars_tmp[9])
+    post_tmp     <- posterior(fit_hmm_tmp)
+    last_state   <- tail(post_tmp$state, 1)
+    
+    # Regime-conditioned: E[Y_{t+1}] = sum_j P(s_{t+1}=j|s_t) * mu_j
+    hmm_pp_fc[i] <- sum(tmat_tmp[last_state, ] * means_tmp)
   } else {
-    hmm_pp_fc[i] <- tail(y_tmp, 1)            # fallback: last observation
+    # Fallback: use ARIMA forecast if HMM fails
+    hmm_pp_fc[i] <- arima_pp_fc[i]
+    cat("  PP HMM fallback at year", test_start + i - 1, "\n")
   }
-  cat("PP year", test_start + i - 1, "done\n")
+  cat("PP", test_start + i - 1, "done |",
+      "ARIMA:", round(arima_pp_fc[i], 4),
+      "HMM:", round(hmm_pp_fc[i], 4),
+      "Actual:", round(actual_pp[i], 4), "\n")
 }
 
-# ── 10.2 Auto — rolling forecasts ─────────────────────────────────────────────
-cat("\n── Auto rolling forecasts ─────────────────────\n")
+# ── Auto rolling forecasts ────────────────────────────────────────
+cat("\nRunning Auto rolling forecasts...\n")
 for (i in seq_len(n_test)) {
-
-  train_auto <- window(auto_ts, end = train_end + i - 1)
-
-  # ARIMA(0,1,1)
-  fit_tmp_arima_a <- Arima(train_auto, order = c(0, 1, 1))
-  arima_auto_fc[i] <- as.numeric(forecast(fit_tmp_arima_a, h = 1)$mean)
-
-  # ARIMA(0,1,1)–GARCH(1,1)
-  auto_d1_tmp <- diff(train_auto)
+  train_auto    <- window(auto_ts, end = train_end + i - 1)
+  train_auto_d1 <- diff(train_auto)
+  
+  # Benchmark: ARIMA(0,1,1)
+  fit_arima_a      <- Arima(train_auto, order = c(0, 1, 1))
+  arima_auto_fc[i] <- as.numeric(forecast(fit_arima_a, h = 1)$mean)
+  
+  # ARIMA(0,1,1)-GARCH(1,1) — point forecast only, no HMM adjustment
   spec_tmp <- ugarchspec(
     variance.model     = list(model = "sGARCH", garchOrder = c(1, 1)),
     mean.model         = list(armaOrder = c(0, 1), include.mean = TRUE),
     distribution.model = "norm"
   )
+  
   fit_garch_tmp <- tryCatch(
-    ugarchfit(spec_tmp, data = auto_d1_tmp, solver = "hybrid"),
-    error = function(e) NULL
+    ugarchfit(spec_tmp, data = train_auto_d1,
+              solver = "hybrid", solver.control = list(trace = 0)),
+    error   = function(e) NULL,
+    warning = function(w) NULL
   )
-
+  
   if (!is.null(fit_garch_tmp)) {
-    fc_garch       <- ugarchforecast(fit_garch_tmp, n.ahead = 1)
-    # Convert differenced forecast back to level scale
+    fc_g             <- ugarchforecast(fit_garch_tmp, n.ahead = 1)
+    # Convert back to level: last level + forecast of difference
     garch_auto_fc[i] <- tail(as.numeric(train_auto), 1) +
-                        as.numeric(fitted(fc_garch))
-  } else {
-    garch_auto_fc[i] <- arima_auto_fc[i]   # fallback to ARIMA
-  }
-
-  # HMM on GARCH residuals
-  if (!is.null(fit_garch_tmp)) {
-    resid_tmp <- as.numeric(residuals(fit_garch_tmp, standardize = TRUE))
-    set.seed(123)
-    fit_hmm_tmp <- tryCatch({
-      m <- depmix(resid_tmp ~ 1, data = data.frame(r = resid_tmp),
-                  nstates = 2, family = gaussian())
-      fit(m, verbose = FALSE)
-    }, error = function(e) NULL)
-
-    if (!is.null(fit_hmm_tmp)) {
-      post_tmp    <- posterior(fit_hmm_tmp)
-      last_state  <- tail(post_tmp$state, 1)
-      pars_tmp    <- getpars(fit_hmm_tmp)
-      state_means <- c(pars_tmp[7], pars_tmp[9])
-      # Add regime residual mean on top of GARCH forecast
-      hmm_auto_fc[i] <- garch_auto_fc[i] + state_means[last_state]
-    } else {
-      hmm_auto_fc[i] <- garch_auto_fc[i]
+      as.numeric(fitted(fc_g)[1])
+    # Sanity check — loss ratio must be positive
+    if (garch_auto_fc[i] < 0 | garch_auto_fc[i] > 2) {
+      garch_auto_fc[i] <- arima_auto_fc[i]
+      cat("  Auto GARCH sanity fallback at year", test_start + i - 1, "\n")
     }
   } else {
-    hmm_auto_fc[i] <- arima_auto_fc[i]
+    garch_auto_fc[i] <- arima_auto_fc[i]
+    cat("  Auto GARCH fit fallback at year", test_start + i - 1, "\n")
   }
-  cat("Auto year", test_start + i - 1, "done\n")
+  
+  cat("Auto", test_start + i - 1, "done |",
+      "ARIMA:", round(arima_auto_fc[i], 4),
+      "GARCH:", round(garch_auto_fc[i], 4),
+      "Actual:", round(actual_auto[i], 4), "\n")
 }
 
-# ── 10.3 Forecast accuracy metrics ────────────────────────────────────────────
-rmse_fn <- function(actual, fc) sqrt(mean((actual - fc)^2))
-mae_fn  <- function(actual, fc) mean(abs(actual - fc))
+# ── Accuracy metrics ──────────────────────────────────────────────
+rmse <- function(a, f) sqrt(mean((a - f)^2))
+mae  <- function(a, f) mean(abs(a - f))
 
 oos_tbl <- data.frame(
-  Line  = c("PP", "PP", "Auto", "Auto", "Auto"),
-  Model = c("ARIMA(0,1,0)", "HMM 2-state",
-            "ARIMA(0,1,1)", "ARIMA-GARCH", "HMM on GARCH resid."),
-  OOS_RMSE = round(c(
-    rmse_fn(actual_pp,   arima_pp_fc),
-    rmse_fn(actual_pp,   hmm_pp_fc),
-    rmse_fn(actual_auto, arima_auto_fc),
-    rmse_fn(actual_auto, garch_auto_fc),
-    rmse_fn(actual_auto, hmm_auto_fc)
-  ), 4),
-  OOS_MAE = round(c(
-    mae_fn(actual_pp,   arima_pp_fc),
-    mae_fn(actual_pp,   hmm_pp_fc),
-    mae_fn(actual_auto, arima_auto_fc),
-    mae_fn(actual_auto, garch_auto_fc),
-    mae_fn(actual_auto, hmm_auto_fc)
-  ), 4)
+  Line  = c("PP", "PP", "Auto", "Auto"),
+  Model = c("AR(1) levels", "HMM 2-state levels",
+            "ARIMA(0,1,1)", "ARIMA-GARCH(1,1)"),
+  RMSE  = round(c(rmse(actual_pp,   arima_pp_fc),
+                  rmse(actual_pp,   hmm_pp_fc),
+                  rmse(actual_auto, arima_auto_fc),
+                  rmse(actual_auto, garch_auto_fc)), 4),
+  MAE   = round(c(mae(actual_pp,   arima_pp_fc),
+                  mae(actual_pp,   hmm_pp_fc),
+                  mae(actual_auto, arima_auto_fc),
+                  mae(actual_auto, garch_auto_fc)), 4)
 )
 
-cat("\n── Out-of-sample forecast accuracy (2011–2022) ─────────────────────────\n")
+cat("\n── Out-of-sample accuracy (2011-2022) ──────────────────────\n")
 print(oos_tbl, row.names = FALSE)
 
-# ── 10.4 Actual vs forecast plots ─────────────────────────────────────────────
+# ── Plot ──────────────────────────────────────────────────────────
+par(mfrow = c(1, 2))
 
-par(mfrow = c(1, 2), xpd = NA)
-
-plot(years_oos, actual_pp, type = "b", pch = 19, col = "black", lwd = 1.5,
-     ylim = range(c(actual_pp, arima_pp_fc, hmm_pp_fc)) + c(-0.02, 0.02),
+# PP
+ylim_pp <- range(c(actual_pp, arima_pp_fc, hmm_pp_fc)) + c(-0.03, 0.03)
+plot(years_oos, actual_pp, type = "b", pch = 19, lwd = 1.5,
+     col = "black", ylim = ylim_pp,
      xlab = "Year", ylab = "Loss ratio",
      main = "PP: Out-of-sample forecasts (2011-2022)")
 lines(years_oos, arima_pp_fc, col = "steelblue", lty = 2, lwd = 1.5)
 lines(years_oos, hmm_pp_fc,   col = "tomato",    lty = 3, lwd = 1.5)
 legend("topright",
-       legend = c("Actual", "ARIMA(0,1,0)", "HMM"),
+       legend = c("Actual", "AR(1)", "HMM"),
        col    = c("black", "steelblue", "tomato"),
-       lty    = c(1, 2, 3), pch = c(19, NA, NA), bty = "n", cex = 0.85)
+       lty    = c(1, 2, 3), pch = c(19, NA, NA),
+       bty = "n", cex = 0.85)
 
-plot(years_oos, actual_auto, type = "b", pch = 19, col = "black", lwd = 1.5,
-     ylim = range(c(actual_auto, arima_auto_fc, garch_auto_fc, hmm_auto_fc)) + c(-0.02, 0.02),
+# Auto
+ylim_auto <- range(c(actual_auto, arima_auto_fc, garch_auto_fc)) + c(-0.02, 0.02)
+plot(years_oos, actual_auto, type = "b", pch = 19, lwd = 1.5,
+     col = "black", ylim = ylim_auto,
      xlab = "Year", ylab = "Loss ratio",
      main = "Auto: Out-of-sample forecasts (2011-2022)")
-lines(years_oos, arima_auto_fc,  col = "steelblue",  lty = 2, lwd = 1.5)
-lines(years_oos, garch_auto_fc,  col = "darkgreen",  lty = 4, lwd = 1.5)
-lines(years_oos, hmm_auto_fc,    col = "tomato",     lty = 3, lwd = 1.5)
+lines(years_oos, arima_auto_fc, col = "steelblue", lty = 2, lwd = 1.5)
+lines(years_oos, garch_auto_fc, col = "darkgreen", lty = 4, lwd = 1.5)
 legend("topright",
-       legend = c("Actual", "ARIMA", "ARIMA-GARCH", "HMM"),
-       col    = c("black", "steelblue", "darkgreen", "tomato"),
-       lty    = c(1, 2, 4, 3), pch = c(19, NA, NA, NA), bty = "n", cex = 0.85)
+       legend = c("Actual", "ARIMA", "ARIMA-GARCH"),
+       col    = c("black", "steelblue", "darkgreen"),
+       lty    = c(1, 2, 4), pch = c(19, NA, NA),
+       bty = "n", cex = 0.85)
 
-par(mfrow = c(1, 1), xpd = FALSE)
+par(mfrow = c(1, 1))
 
 
 ###############################################################################
-## 10.  REGIME-CONDITIONED FORECASTS (2023–2025)
+## 11.  REGIME-CONDITIONED FORECASTS (2023–2025)
 ###############################################################################
 ##
 ##  Given the current regime at end of 2022, forecast 3 years ahead.
@@ -1187,14 +1281,6 @@ legend("topleft",
        border = NA, bty = "n", cex = 0.85)
 
 par(mfrow = c(1, 1))
-
-
-
-
-
-
-
-
 
 
 
