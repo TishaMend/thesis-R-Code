@@ -8,17 +8,7 @@ To use the script, first download the script and the Excel file from Appendix A 
 Next, open the script file in RStudio or run it using the command source("R Code Dissertation.R"). 
 The script requires the following R packages:
 
-urca
-tseries
-forecast
-rugarch
-depmixS4
-WaveletComp
-dplyr
-tidyr
-ggplot2
-patchwork
-readxl
+urca, tseries, forecast, rugarch, depmixS4, WaveletComp, dplyr, tidyr, ggplot2, patchwork, readxl
 
 Before running the analysis, you must manually ensure that the Excel file is correctly loaded in the script.
 
