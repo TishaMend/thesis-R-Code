@@ -12,4 +12,4 @@ urca, tseries, forecast, rugarch, depmixS4, WaveletComp, dplyr, tidyr, ggplot2, 
 
 Before running the analysis, you must manually ensure that the Excel file is correctly loaded in the script.
 
-Once everything is set up correctly, run the script to perform the full statistical analysis.
+Once everything is set up correctly, run the script to perform the full statistical analysis. 
